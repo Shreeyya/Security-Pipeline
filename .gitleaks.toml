@@ -1,0 +1,18 @@
+title = "gitleaks config"
+
+# Uses Gitleaks' built-in default detection rules (AWS keys, GitHub tokens,
+# private keys, generic high-entropy secrets, etc.) and only adds a
+# project-specific allowlist on top.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist"
+paths = [
+  '''(.*?)(jpg|gif|doc|pdf|bin)$''',
+]
+
+# If a scan ever flags something that is genuinely not a secret
+# (e.g. a placeholder/example value in docs), add its exact match here
+# rather than disabling the rule — keeps the gate strict everywhere else.
+# regexes = ['''example-placeholder-token-do-not-flag''']

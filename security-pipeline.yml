@@ -1,0 +1,244 @@
+name: Security Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 2 * * *'   # nightly full scan, catches newly disclosed CVEs
+  workflow_dispatch: {}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_TAG: ${{ github.sha }}
+  APP_PORT: 8080
+
+permissions:
+  contents: read
+  security-events: write   # needed to upload SARIF to the Security tab
+  packages: write          # needed to push image to GHCR
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────
+  # STAGE 1 — fast static checks, run in parallel, no build needed
+  # ────────────────────────────────────────────────────────────
+
+  secret-scan:
+    name: Secret Scanning (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so gitleaks can scan past commits
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Fails the job automatically (exit code 1) on any leak found.
+          # Add a .gitleaks.toml at repo root to tune rules/allowlist.
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        run: |
+          semgrep ci \
+            --config auto \
+            --sarif --output semgrep-results.sarif \
+            --severity ERROR
+          # `semgrep ci` exits 1 if any finding matches the configured
+          # severity, which fails this job. --severity ERROR limits the
+          # blocking gate to high-confidence/critical rules; INFO/WARNING
+          # findings still get reported but don't fail the build.
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-results.sarif
+
+  sca:
+    name: SCA (Snyk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run Snyk dependency scan
+        uses: snyk/actions/python-3.10@master
+        continue-on-error: false
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --file=requirements.txt --severity-threshold=critical --sarif-file-output=snyk-results.sarif
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-results.sarif
+
+  # ────────────────────────────────────────────────────────────
+  # STAGE 2 — build image (only if stage 1 passed)
+  # ────────────────────────────────────────────────────────────
+
+  build:
+    name: Build Container Image
+    needs: [secret-scan, sast, sca]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image ref
+        id: meta
+        run: echo "image=${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ────────────────────────────────────────────────────────────
+  # STAGE 3 — checks that need the built image
+  # ────────────────────────────────────────────────────────────
+
+  container-scan:
+    name: Container Scan (Trivy)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build.outputs.image }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: 1          # fails the job when matches are found
+          ignore-unfixed: true  # don't fail on CVEs with no available fix
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  sbom:
+    name: Generate SBOM
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate SBOM (Syft, CycloneDX format)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ needs.build.outputs.image }}
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.cyclonedx.json
+          retention-days: 90
+
+  # ────────────────────────────────────────────────────────────
+  # STAGE 4 — DAST against the running container
+  # ────────────────────────────────────────────────────────────
+
+  dast:
+    name: DAST (OWASP ZAP)
+    needs: [container-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start application container
+        run: |
+          docker run -d --name app-under-test \
+            -p ${{ env.APP_PORT }}:${{ env.APP_PORT }} \
+            ${{ needs.build.outputs.image || 'ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}' }}
+          # Give the app time to become healthy before scanning.
+          for i in {1..15}; do
+            curl -sf http://localhost:${{ env.APP_PORT }} && break
+            echo "waiting for app to be ready ($i)..."; sleep 4
+          done
+
+      - name: Run ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: 'http://localhost:${{ env.APP_PORT }}'
+          fail_action: true          # fails the job on findings at/above threshold
+          cmd_options: '-I'          # -I: don't fail on informational alerts
+          # For deeper coverage against an app you're comfortable
+          # authenticating/crawling more aggressively, swap in
+          # zaproxy/action-full-scan instead.
+
+      - name: Stop application container
+        if: always()
+        run: docker rm -f app-under-test
+
+  # ────────────────────────────────────────────────────────────
+  # FINAL GATE — single required status check for branch protection
+  # ────────────────────────────────────────────────────────────
+
+  security-gate:
+    name: Security Gate
+    needs: [secret-scan, sast, sca, container-scan, sbom, dast]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all security checks passed
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "One or more security checks failed. Blocking merge/deploy."
+            exit 1
+          fi
+          echo "All security checks passed."
