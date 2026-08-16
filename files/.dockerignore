@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.github/
+.env
+.venv/
+venv/
+*.md
+tests/
+.pytest_cache/
+.mypy_cache/
+sbom*.json
+*.sarif
