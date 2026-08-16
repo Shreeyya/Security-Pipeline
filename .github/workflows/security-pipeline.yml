@@ -55,8 +55,7 @@ jobs:
         run: |
           semgrep ci \
             --config auto \
-            --sarif --output semgrep-results.sarif \
-            --severity ERROR
+            --sarif --output semgrep-results.sarif 
           # `semgrep ci` exits 1 if any finding matches the configured
           # severity, which fails this job. --severity ERROR limits the
           # blocking gate to high-confidence/critical rules; INFO/WARNING
