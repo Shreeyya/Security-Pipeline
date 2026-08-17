@@ -17,4 +17,4 @@ def health():
 if __name__ == "__main__":
     # debug=False is required — Flask's debugger exposes a remote code
     # execution surface if left on in anything resembling production.
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    app.run(...)
