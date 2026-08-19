@@ -55,16 +55,16 @@ jobs:
         run: |
           semgrep ci \
             --config auto \
-            --sarif --output semgrep-results.sarif 
-          # `semgrep ci` exits 1 if any finding matches the configured
-          # severity, which fails this job. --severity ERROR limits the
-          # blocking gate to high-confidence/critical rules; INFO/WARNING
-          # findings still get reported but don't fail the build.
+            --sarif --output semgrep-results.sarif
+          # `semgrep ci` exits 1 automatically if any blocking finding is
+          # matched by the ruleset (auto config uses Semgrep's default
+          # blocking severity tiers). Unlike `semgrep scan`, `semgrep ci`
+          # does not accept a --severity flag directly.
 
       - name: Upload SARIF to GitHub Security tab
         if: always()
         uses: github/codeql-action/upload-sarif@v3
-        continue-on-error: true
+        continue-on-error: true   # a GitHub-side upload hiccup shouldn't fail the actual scan job
         with:
           sarif_file: semgrep-results.sarif
 
@@ -90,7 +90,7 @@ jobs:
       - name: Upload SARIF to GitHub Security tab
         if: always()
         uses: github/codeql-action/upload-sarif@v3
-        continue-on-error: true
+        continue-on-error: true   # a GitHub-side upload hiccup shouldn't fail the actual scan job
         with:
           sarif_file: snyk-results.sarif
 
@@ -106,8 +106,8 @@ jobs:
       image: ${{ steps.meta.outputs.image }}
     steps:
       - uses: actions/checkout@v4
-        #docker/setup-buildx-action@v3
-      #- name: Log in to GHCR
+
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -124,8 +124,6 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.image }}
-          #cache-from: type=gha
-          #cache-to: type=gha,mode=max
 
   # ────────────────────────────────────────────────────────────
   # STAGE 3 — checks that need the built image
@@ -156,7 +154,7 @@ jobs:
       - name: Upload SARIF to GitHub Security tab
         if: always()
         uses: github/codeql-action/upload-sarif@v3
-        continue-on-error: true
+        continue-on-error: true   # a GitHub-side upload hiccup shouldn't fail the actual scan job
         with:
           sarif_file: trivy-results.sarif
 
