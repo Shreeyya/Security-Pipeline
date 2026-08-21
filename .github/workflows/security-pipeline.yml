@@ -146,15 +146,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run Trivy image scan
+      - name: Run Trivy image scan (SARIF, for GitHub Security tab)
+        id: trivy_sarif
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ needs.build.outputs.image }}
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
-          exit-code: 1          # fails the job when matches are found
+          exit-code: 0          # don't fail here — the table step below is the one that gates the build
           ignore-unfixed: true  # don't fail on CVEs with no available fix
+
+      - name: Run Trivy image scan (readable table, prints to log)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ needs.build.outputs.image }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 1          # this is the step that actually fails the job on findings
+          ignore-unfixed: true
 
       - name: Upload SARIF to GitHub Security tab
         if: always()
