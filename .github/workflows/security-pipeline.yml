@@ -219,7 +219,7 @@ jobs:
         run: |
           docker run -d --name app-under-test \
             -p ${{ env.APP_PORT }}:${{ env.APP_PORT }} \
-            ${{ needs.build.outputs.image || 'ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}' }}
+            ${{ needs.build.outputs.image }}
           # Give the app time to become healthy before scanning.
           for i in {1..15}; do
             curl -sf http://localhost:${{ env.APP_PORT }} && break
